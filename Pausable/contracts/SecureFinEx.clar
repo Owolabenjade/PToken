@@ -9,6 +9,8 @@
 (define-constant ERR_BLACKLISTED (err u4))
 (define-constant ERR_RATE_LIMIT (err u5))
 (define-constant ERR_INVALID_AMOUNT (err u6))
+(define-constant ERR_INVALID_ADDRESS (err u7))
+(define-constant ERR_SELF_TRANSFER (err u8))
 (define-constant RATE_LIMIT_PERIOD u86400) ;; 24 hours in seconds
 
 ;; Data Variables
@@ -36,8 +38,8 @@
           (current-amount (default-to u0 
             (map-get? daily-transfer-amounts 
                 {user: sender, day: current-day}))))
-        (if (and rate-limit-active
-                (> (+ current-amount amount) rate-limit-amount))
+        (if (and (var-get rate-limit-active)
+                (> (+ current-amount amount) (var-get rate-limit-amount)))
             ERR_RATE_LIMIT
             (ok true))))
 
@@ -45,6 +47,11 @@
     (map-set balance-snapshots 
         {user: address, timestamp: block-height}
         (default-to u0 (get-balance address))))
+
+(define-private (validate-address (address principal))
+    (if (is-eq address tx-sender)
+        ERR_SELF_TRANSFER
+        (ok true)))
 
 ;; Public Functions
 
@@ -56,7 +63,16 @@
         (asserts! (not (is-blacklisted sender)) ERR_BLACKLISTED)
         (asserts! (not (is-blacklisted recipient)) ERR_BLACKLISTED)
         (asserts! (>= sender-balance amount) ERR_INVALID_AMOUNT)
+        (asserts! (not (is-eq sender recipient)) ERR_SELF_TRANSFER)
         (try! (check-rate-limit sender amount))
+        
+        ;; Update daily transfer amount
+        (let ((current-day (/ block-height u144)))
+            (map-set daily-transfer-amounts 
+                {user: sender, day: current-day}
+                (+ amount (default-to u0 
+                    (map-get? daily-transfer-amounts 
+                        {user: sender, day: current-day})))))
         
         (map-set balances sender (- sender-balance amount))
         (map-set balances recipient 
@@ -84,12 +100,15 @@
 (define-public (add-admin-signature (admin principal))
     (begin
         (asserts! (is-admin tx-sender) ERR_NOT_AUTHORIZED)
+        (asserts! (not (is-eq admin tx-sender)) ERR_SELF_TRANSFER)
+        (asserts! (not (is-eq admin CONTRACT_OWNER)) ERR_NOT_AUTHORIZED)
         (map-set admin-signatures admin true)
         (ok true)))
 
 (define-public (remove-admin-signature (admin principal))
     (begin
         (asserts! (is-admin tx-sender) ERR_NOT_AUTHORIZED)
+        (asserts! (not (is-eq admin CONTRACT_OWNER)) ERR_NOT_AUTHORIZED)
         (map-set admin-signatures admin false)
         (ok true)))
 
@@ -97,6 +116,8 @@
 (define-public (add-to-blacklist (address principal))
     (begin
         (asserts! (is-admin tx-sender) ERR_NOT_AUTHORIZED)
+        (asserts! (not (is-eq address CONTRACT_OWNER)) ERR_NOT_AUTHORIZED)
+        (asserts! (not (is-admin address)) ERR_NOT_AUTHORIZED)
         (map-set blacklisted-addresses address true)
         (take-snapshot address)
         (ok true)))
@@ -104,6 +125,12 @@
 (define-public (remove-from-blacklist (address principal))
     (begin
         (asserts! (is-admin tx-sender) ERR_NOT_AUTHORIZED)
+        ;; Check if address is actually blacklisted before removing
+        (asserts! (is-blacklisted address) ERR_NOT_AUTHORIZED)
+        ;; Check that we're not trying to remove CONTRACT_OWNER (extra safety)
+        (asserts! (not (is-eq address CONTRACT_OWNER)) ERR_NOT_AUTHORIZED)
+        ;; Check that we're not trying to remove an admin
+        (asserts! (not (is-admin address)) ERR_NOT_AUTHORIZED)
         (map-set blacklisted-addresses address false)
         (ok true)))
 
@@ -115,12 +142,16 @@
     (begin
         (asserts! (var-get contract-paused) ERR_NOT_PAUSED)
         (asserts! (not (is-blacklisted tx-sender)) ERR_BLACKLISTED)
+        (asserts! (not (is-eq new-address tx-sender)) ERR_SELF_TRANSFER)
+        (asserts! (not (is-blacklisted new-address)) ERR_BLACKLISTED)
         (map-set recovery-requests {owner: tx-sender, new-address: new-address} true)
         (ok true)))
 
 (define-public (approve-recovery (owner principal) (new-address principal))
     (begin
         (asserts! (is-admin tx-sender) ERR_NOT_AUTHORIZED)
+        (asserts! (not (is-eq owner new-address)) ERR_SELF_TRANSFER)
+        (asserts! (not (is-blacklisted new-address)) ERR_BLACKLISTED)
         (asserts! (default-to false 
             (map-get? recovery-requests {owner: owner, new-address: new-address}))
             ERR_NOT_AUTHORIZED)
@@ -135,6 +166,7 @@
 (define-public (set-rate-limit (active bool) (amount uint))
     (begin
         (asserts! (is-admin tx-sender) ERR_NOT_AUTHORIZED)
+        (asserts! (> amount u0) ERR_INVALID_AMOUNT)
         (var-set rate-limit-active active)
         (var-set rate-limit-amount amount)
         (ok true)))
