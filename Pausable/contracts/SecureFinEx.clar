@@ -29,12 +29,13 @@
 ;; Private Functions
 (define-private (is-admin (account principal))
     (or (is-eq account CONTRACT_OWNER)
-        (default-to false (get-admin-signature account))))
+        (default-to false (map-get? admin-signatures account))))
 
 (define-private (check-rate-limit (sender principal) (amount uint))
     (let ((current-day (/ block-height u144))  ;; ~144 blocks per day
-          (current-amount (default-to u0 (get-daily-transfer amount 
-            {user: sender, day: current-day}))))
+          (current-amount (default-to u0 
+            (map-get? daily-transfer-amounts 
+                {user: sender, day: current-day}))))
         (if (and rate-limit-active
                 (> (+ current-amount amount) rate-limit-amount))
             ERR_RATE_LIMIT
